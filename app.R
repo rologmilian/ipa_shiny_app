@@ -109,7 +109,14 @@ convert_clusterprofiler_to_em <- function(df, output_file, id_prefix = "CP") {
 
 ui <- fluidPage(
   
-  titlePanel("🧬 Pathway Enrichment Results to EnrichmentMap Converter"),
+  titlePanel("🧬 Pathway Enrichment Results to Enrichment Map Converter"),
+  
+  p(
+    style = "color: #555555; font-size: 15px; margin-top: -10px; margin-bottom: 15px; padding-left: 15px;",
+    "This app converts Ingenuity Pathway Analysis enrichment and clusterProfiler enrichment 
+     results files into a generic format for ",
+    strong("Enrichment Map Cytoscape App.")
+  ),
   
   tabsetPanel(
     
