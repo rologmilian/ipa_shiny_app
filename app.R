@@ -2,6 +2,7 @@ library(shiny)
 library(readxl)
 library(tidyverse)
 library(readr)
+library(dplyr)    # load explicitly AFTER tidyverse to ensure dplyr wins
 
 # ============================================================
 # GENERIC FUNCTION — IPA
@@ -9,71 +10,117 @@ library(readr)
 
 convert_to_enrichment_map <- function(df, output_file, id_prefix = "IPA") {
   
-  name_col <- case_when(
-    "ingenuity canonical pathways" %in% colnames(df) ~ "ingenuity canonical pathways",
-    "diseases or functions annotation" %in% colnames(df) ~ "diseases or functions annotation",
+  all_cols <- colnames(df)
+  
+  # ── 1. Name column ───────────────────────────────────────────
+  name_col <- dplyr::case_when(
+    "ingenuity canonical pathways"     %in% all_cols ~ "ingenuity canonical pathways",
+    "diseases or functions annotation" %in% all_cols ~ "diseases or functions annotation",
     TRUE ~ NA_character_
   )
-  
-  pval_col <- case_when(
-    "-log(p-value)" %in% colnames(df) ~ "-log(p-value)",
-    "p-value" %in% colnames(df) ~ "p-value",
-    TRUE ~ NA_character_
-  )
-  
-  fdr_col <- case_when(
-    "b-h p-value" %in% colnames(df) ~ "b-h p-value",
-    "-log(p-value)" %in% colnames(df) ~ "-log(p-value)",
-    TRUE ~ NA_character_
-  )
-  
-  zscore_col <- case_when(
-    "z-score" %in% colnames(df) ~ "z-score",
-    "activation z-score" %in% colnames(df) ~ "activation z-score",
-    TRUE ~ NA_character_
-  )
-  
   if (is.na(name_col)) stop("Could not detect a pathway/function name column.")
+  
+  # ── 2. Smart p-value column detection ────────────────────────
+  neg_log_patterns  <- c("-log(b-h p-value)", "-log(p-value)", "-log10(p-value)",
+                         "-log10(b-h p-value)", "-log10p-value", "-log10 p-value")
+  raw_pval_patterns <- c("p-value", "pvalue", "p value", "b-h p-value", "bh p-value")
+  
+  pval_col       <- NA_character_
+  pval_is_neglog <- FALSE
+  
+  matched_neglog <- intersect(all_cols, neg_log_patterns)
+  matched_raw    <- intersect(all_cols, raw_pval_patterns)
+  
+  if (length(matched_neglog) > 0) {
+    pval_col       <- matched_neglog[1]
+    pval_is_neglog <- TRUE
+  } else if (length(matched_raw) > 0) {
+    pval_col       <- matched_raw[1]
+    pval_is_neglog <- FALSE
+  } else {
+    # Positional fallback: use column 2 and inspect values
+    col2_name   <- all_cols[2]
+    col2_values <- suppressWarnings(as.numeric(df[[col2_name]]))
+    col2_values <- col2_values[!is.na(col2_values)]
+    
+    if (length(col2_values) > 0) {
+      if (all(col2_values >= 0 & col2_values <= 1)) {
+        pval_col       <- col2_name
+        pval_is_neglog <- FALSE
+        message("Auto-detected column '", col2_name, "' as raw p-value (values 0-1).")
+      } else {
+        pval_col       <- col2_name
+        pval_is_neglog <- TRUE
+        message("Auto-detected column '", col2_name, "' as -log10(p-value) (values > 1).")
+      }
+    }
+  }
+  
   if (is.na(pval_col)) stop("Could not detect a p-value column.")
   
+  # ── 3. FDR column ─────────────────────────────────────────────
+  fdr_col <- dplyr::case_when(
+    "b-h p-value"         %in% all_cols ~ "b-h p-value",
+    "-log(b-h p-value)"   %in% all_cols ~ "-log(b-h p-value)",
+    "-log10(b-h p-value)" %in% all_cols ~ "-log10(b-h p-value)",
+    TRUE ~ pval_col
+  )
+  
+  fdr_neglog_names <- c("-log(b-h p-value)", "-log(p-value)",
+                        "-log10(b-h p-value)", "-log10(p-value)")
+  fdr_is_neglog <- fdr_col %in% fdr_neglog_names | (fdr_col == pval_col & pval_is_neglog)
+  
+  # ── 4. Z-score column ─────────────────────────────────────────
+  zscore_col <- dplyr::case_when(
+    "z-score"            %in% all_cols ~ "z-score",
+    "activation z-score" %in% all_cols ~ "activation z-score",
+    TRUE ~ NA_character_
+  )
+  
+  # ── 5. Molecules column ───────────────────────────────────────
+  mol_col <- dplyr::case_when(
+    "molecules" %in% all_cols ~ "molecules",
+    "genes"     %in% all_cols ~ "genes",
+    TRUE ~ NA_character_
+  )
+  if (is.na(mol_col)) stop("Could not detect a Molecules/Genes column.")
+  
+  # ── 6. Build output ───────────────────────────────────────────
   result <- df %>%
-    mutate(
-      GO.ID       = paste0(id_prefix, ":", row_number()),
+    dplyr::mutate(
+      GO.ID       = paste0(id_prefix, ":", dplyr::row_number()),
       Description = .data[[name_col]],
       
-      p.Val = if (pval_col == "-log(p-value)") {
-        10^(-.data[[pval_col]])
-      } else {
-        .data[[pval_col]]
+      p.Val = {
+        raw <- suppressWarnings(as.numeric(.data[[pval_col]]))
+        if (pval_is_neglog) 10^(-raw) else raw
       },
       
-      FDR = if (fdr_col == "b-h p-value") {
-        .data[[fdr_col]]
-      } else {
-        p.Val
+      FDR = {
+        raw <- suppressWarnings(as.numeric(.data[[fdr_col]]))
+        if (fdr_is_neglog) 10^(-raw) else raw
       },
       
       Phenotype = if (!is.na(zscore_col)) {
-        ifelse(.data[[zscore_col]] >= 0 | is.na(.data[[zscore_col]]), 1, -1)
+        ifelse(is.na(.data[[zscore_col]]) | .data[[zscore_col]] >= 0, 1L, -1L)
       } else {
         1L
       },
       
-      Genes = molecules
+      Genes = .data[[mol_col]]
     ) %>%
-    select(GO.ID, Description, p.Val, FDR, Phenotype, Genes)
+    dplyr::select(GO.ID, Description, p.Val, FDR, Phenotype, Genes)
   
-  write_tsv(result, output_file)
+  readr::write_tsv(result, output_file)
   return(result)
 }
 
 # ============================================================
-# NEW FUNCTION — clusterProfiler
+# FUNCTION — clusterProfiler
 # ============================================================
 
 convert_clusterprofiler_to_em <- function(df, output_file, id_prefix = "CP") {
   
-  # Validate required columns
   required_cols <- c("ID", "Description", "pvalue", "p.adjust", "geneID")
   missing <- setdiff(required_cols, colnames(df))
   if (length(missing) > 0) {
@@ -81,25 +128,23 @@ convert_clusterprofiler_to_em <- function(df, output_file, id_prefix = "CP") {
   }
   
   result <- df %>%
-    mutate(
+    dplyr::mutate(
       GO.ID       = ID,
       Description = Description,
       p.Val       = pvalue,
       FDR         = p.adjust,
       
-      # Use zScore if present, otherwise default to +1
-      Phenotype   = if ("zScore" %in% colnames(df)) {
+      Phenotype = if ("zScore" %in% colnames(df)) {
         ifelse(is.na(zScore) | zScore >= 0, 1L, -1L)
       } else {
         1L
       },
       
-      # clusterProfiler separates genes with "/" — EM expects "," or "|"
-      Genes = str_replace_all(geneID, "/", ",")
+      Genes = stringr::str_replace_all(geneID, "/", ",")
     ) %>%
-    select(GO.ID, Description, p.Val, FDR, Phenotype, Genes)
+    dplyr::select(GO.ID, Description, p.Val, FDR, Phenotype, Genes)
   
-  write_tsv(result, output_file)
+  readr::write_tsv(result, output_file)
   return(result)
 }
 
@@ -194,10 +239,9 @@ ui <- fluidPage(
                            accept = c(".csv", ".txt", ".tsv")),
                  hr(),
                  
-                 # Optional p-value filter
                  numericInput("cp_pval_cutoff",
                               "p.adjust cutoff (optional filter)",
-                              value = 1,   # default = no filter
+                              value = 1,
                               min   = 0,
                               max   = 1,
                               step  = 0.05),
@@ -265,8 +309,8 @@ server <- function(input, output, session) {
     tryCatch({
       
       if (!is.null(input$canonical_file)) {
-        canonical_df <- read_excel(input$canonical_file$datapath, skip = 1)
-        colnames(canonical_df) <- tolower(colnames(canonical_df))
+        canonical_df <- readxl::read_excel(input$canonical_file$datapath, skip = 1)
+        colnames(canonical_df) <- tolower(trimws(colnames(canonical_df)))
         tmp_canonical <- tempfile(fileext = ".txt")
         results$canonical <- convert_to_enrichment_map(
           df          = canonical_df,
@@ -277,8 +321,8 @@ server <- function(input, output, session) {
       }
       
       if (!is.null(input$bio_file)) {
-        bio_df <- read_excel(input$bio_file$datapath, skip = 1)
-        colnames(bio_df) <- tolower(colnames(bio_df))
+        bio_df <- readxl::read_excel(input$bio_file$datapath, skip = 1)
+        colnames(bio_df) <- tolower(trimws(colnames(bio_df)))
         tmp_bio <- tempfile(fileext = ".txt")
         results$bio <- convert_to_enrichment_map(
           df          = bio_df,
@@ -306,18 +350,16 @@ server <- function(input, output, session) {
       
       req(input$cp_file)
       
-      # Auto-detect delimiter from extension
       ext <- tools::file_ext(input$cp_file$name)
       cp_df <- if (ext == "csv") {
-        read_csv(input$cp_file$datapath, show_col_types = FALSE)
+        readr::read_csv(input$cp_file$datapath, show_col_types = FALSE)
       } else {
-        read_tsv(input$cp_file$datapath, show_col_types = FALSE)
+        readr::read_tsv(input$cp_file$datapath, show_col_types = FALSE)
       }
       
-      # Optional p.adjust filter
       if ("p.adjust" %in% colnames(cp_df)) {
         cp_df <- cp_df %>%
-          filter(p.adjust <= input$cp_pval_cutoff)
+          dplyr::filter(p.adjust <= input$cp_pval_cutoff)
       }
       
       if (nrow(cp_df) == 0) {
@@ -376,17 +418,17 @@ server <- function(input, output, session) {
   # ==========================
   output$download_canonical <- downloadHandler(
     filename = function() { "ipa_canonical_pathways_EM.txt" },
-    content  = function(file) { write_tsv(results$canonical, file) }
+    content  = function(file) { readr::write_tsv(results$canonical, file) }
   )
   
   output$download_bio <- downloadHandler(
     filename = function() { "ipa_biofunctions_EM.txt" },
-    content  = function(file) { write_tsv(results$bio, file) }
+    content  = function(file) { readr::write_tsv(results$bio, file) }
   )
   
   output$cp_download <- downloadHandler(
     filename = function() { "clusterprofiler_EM.txt" },
-    content  = function(file) { write_tsv(cp_results$data, file) }
+    content  = function(file) { readr::write_tsv(cp_results$data, file) }
   )
 }
 
