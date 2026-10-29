@@ -359,12 +359,12 @@ Generic/gProfiler format that Enrichment Map accepts.
 - [ ] Test the import of the converted files and the grey-coloring steps in Cytoscape.
 - [ ] For GSEA, offer loading a GMT file so Enrichment Map uses full gene sets instead of
       leading edges?
-- [ ] Add the missing LICENSE file (or remove the link below).
+- [x] Added the LICENSE file (MIT License, 2026-10-29)
 
 ---
 
 ## License
 
-This project is open source. See the [LICENSE](LICENSE) file in the repository for details.
+This project is released under the [MIT License](LICENSE). Copyright (c) 2026 RG Milian.
 
 GitHub Repository: [https://github.com/rologmilian/ipa_shiny_app](https://github.com/rologmilian/ipa_shiny_app)
